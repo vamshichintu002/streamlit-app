@@ -40,6 +40,74 @@ def get_quiz(title: str, description: str) -> List[Dict[str, Any]]:
         st.error(f"Error getting quiz: {str(e)}")
         return []
 
+def get_qa(title: str, description: str) -> List[Dict[str, Any]]:
+    """Fetch Q&A from backend API"""
+    try:
+        # Get video ID from session state
+        video_id = st.session_state.get('video_id', '')
+        if not video_id:
+            st.error("No video ID available")
+            return []
+            
+        response = requests.get(
+            f"{BACKEND_URL}/qa/{video_id}",
+            params={"title": title, "description": description}
+        )
+        st.write(f"Debug - Response status: {response.status_code}")
+        st.write(f"Debug - Response content: {response.text}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            qa_list = data.get('qa', [])
+            if not qa_list:
+                st.warning("No Q&A questions were generated. Using default questions.")
+                return get_default_questions()
+            return qa_list
+        else:
+            st.error(f"Error getting Q&A: {response.text}")
+            return get_default_questions()
+    except Exception as e:
+        st.error(f"Error getting Q&A: {str(e)}")
+        return get_default_questions()
+
+def get_default_questions() -> List[Dict[str, Any]]:
+    """Return default questions when there's an error."""
+    return [
+        {
+            "question": "Explain how Python handles variable assignment and memory management.",
+            "expected_concepts": ["dynamic typing", "memory allocation", "reference counting", "garbage collection"]
+        },
+        {
+            "question": "What are the key differences between lists and tuples in Python, and when would you use each?",
+            "expected_concepts": ["mutability", "immutability", "data structure", "performance", "use cases"]
+        },
+        {
+            "question": "Describe Python's approach to object-oriented programming.",
+            "expected_concepts": ["classes", "objects", "inheritance", "encapsulation", "polymorphism"]
+        }
+    ]
+
+def evaluate_qa_answer(question: Dict[str, Any], answer: str) -> tuple[float, str, list]:
+    """Submit Q&A answer for evaluation"""
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/qa/evaluate",
+            json={"question": question, "answer": answer}
+        )
+        if response.status_code == 200:
+            result = response.json()
+            return (
+                result.get('score', 0.0),
+                result.get('feedback', ''),
+                result.get('concepts_covered', [])
+            )
+        else:
+            st.error(f"Error evaluating answer: {response.text}")
+            return 0.0, "Error evaluating answer", []
+    except Exception as e:
+        st.error(f"Error evaluating answer: {str(e)}")
+        return 0.0, "Error evaluating answer", []
+
 def display_quiz(quiz: List[Dict[str, Any]], container) -> None:
     """Display quiz in the given container"""
     if not quiz:
@@ -113,6 +181,77 @@ def display_quiz(quiz: List[Dict[str, Any]], container) -> None:
             st.session_state.quiz_score = 0
             st.experimental_rerun()
 
+def display_qa(qa_list: List[Dict[str, Any]], container) -> None:
+    """Display Q&A section in the given container"""
+    if not qa_list:
+        container.warning("No Q&A available for this video.")
+        return
+
+    container.subheader("🤔 Open-ended Questions")
+    
+    # Initialize session state for Q&A
+    if 'qa_answers' not in st.session_state:
+        st.session_state.qa_answers = {}
+    if 'qa_evaluations' not in st.session_state:
+        st.session_state.qa_evaluations = {}
+    if 'qa_submitted' not in st.session_state:
+        st.session_state.qa_submitted = False
+    if 'qa_total_score' not in st.session_state:
+        st.session_state.qa_total_score = 0
+    
+    # Display questions and collect answers
+    for i, qa_item in enumerate(qa_list):
+        container.write(f"**Question {i+1}:** {qa_item.get('question', '')}")
+        
+        # Text area for each answer
+        answer = container.text_area(
+            "Your answer:",
+            key=f"qa_{i}",
+            help="Write a 1-3 line answer"
+        )
+        
+        if answer:
+            st.session_state.qa_answers[i] = answer
+        
+        container.write("---")
+    
+    # Submit button
+    if not st.session_state.qa_submitted and container.button("Submit Answers", key="submit_qa"):
+        total_score = 0
+        results = container.container()
+        results.subheader("Q&A Results")
+        
+        for i, qa_item in enumerate(qa_list):
+            user_answer = st.session_state.qa_answers.get(i, "")
+            if user_answer:
+                evaluation = evaluate_qa_answer(qa_item, user_answer)
+                st.session_state.qa_evaluations[i] = evaluation
+                score, feedback, concepts = evaluation  # Unpack the tuple
+                total_score += score
+                
+                results.write(f"**Question {i+1}:**")
+                results.write(f"Score: {score:.2f}")
+                results.info(feedback)
+                results.write("Concepts covered: " + ", ".join(concepts))  # Use the unpacked concepts
+                results.write("---")
+        
+        avg_score = total_score / len(qa_list) if qa_list else 0
+        st.session_state.qa_total_score = avg_score
+        results.info(f"Overall Score: {avg_score:.2f}/1.0")
+        st.session_state.qa_submitted = True
+        
+        # Combined performance assessment
+        if hasattr(st.session_state, 'quiz_score'):
+            quiz_percentage = st.session_state.quiz_score / len(st.session_state.quiz_answers) if st.session_state.quiz_answers else 0
+            combined_score = (quiz_percentage + avg_score) / 2
+            
+            if combined_score < 0.7:  # Less than 70%
+                results.warning("Based on your quiz and Q&A performance, we recommend rewatching the video to better understand the concepts.")
+            elif combined_score < 0.85:  # Between 70% and 85%
+                results.info("Good effort! Consider reviewing specific sections of the video related to the concepts you missed.")
+            else:  # 85% or higher
+                results.success("Excellent work! You've demonstrated a strong understanding of the material.")
+
 def main():
     st.set_page_config(
         layout="wide",
@@ -169,6 +308,8 @@ def main():
         st.subheader("📺 " + video_title)
         video_id = get_video_id(video_url)
         if video_id:
+            # Store video_id in session state
+            st.session_state['video_id'] = video_id
             # Embed YouTube video
             embed_code = f'''
                 <iframe
@@ -185,8 +326,8 @@ def main():
             st.error("Invalid video URL")
     
     with col2:
-        quiz_section = st.container()
-        quiz_section.markdown('<div class="quiz-section">', unsafe_allow_html=True)
+        quiz_container = st.container()
+        quiz_container.markdown('<div class="quiz-section">', unsafe_allow_html=True)
         
         # Initialize or get quiz from session state
         if 'current_quiz' not in st.session_state:
@@ -195,8 +336,12 @@ def main():
                 st.session_state.current_quiz = quiz
         
         # Display the quiz
-        display_quiz(st.session_state.current_quiz, quiz_section)
-        quiz_section.markdown('</div>', unsafe_allow_html=True)
+        display_quiz(st.session_state.current_quiz, quiz_container)
+        quiz_container.markdown('</div>', unsafe_allow_html=True)
+        
+        qa_container = st.container()
+        qa_list = get_qa(video_title, video_description)
+        display_qa(qa_list, qa_container)
 
 if __name__ == "__main__":
-    main()
+    main()  
